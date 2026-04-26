@@ -9,20 +9,39 @@ import requests
 import os
 import io
 import sys
-import traceback
 
-# Set page config must be the first Streamlit command
+# Must be first Streamlit command
 st.set_page_config(
-    page_title="Sketch to Real Image Generator",
+    page_title="Sketch to Real Image Translator",
     page_icon="🎨",
     layout="wide"
 )
 
-# Debug information
-st.sidebar.info(f"🐍 Python version: {sys.version.split()[0]}")
-st.sidebar.info(f"🔥 PyTorch version: {torch.__version__}")
+# Title and description
+st.title("🎨 Sketch to Real Image Translation")
+st.markdown("Upload a sketch and watch it transform into a realistic image using Pix2Pix GAN!")
 
-# Define the Generator architecture (same as your training code)
+# Sidebar info
+with st.sidebar:
+    st.markdown("## 📌 About")
+    st.markdown("""
+    This app uses a **Pix2Pix GAN** model trained on face sketches.
+    
+    ### How it works:
+    1. Upload a face sketch
+    2. AI processes the sketch
+    3. Generates realistic face
+    
+    ### Tips:
+    - Use front-facing sketches
+    - Clear lines work best
+    - Image resized to 256x256
+    """)
+    st.markdown("---")
+    st.markdown(f"🐍 Python: {sys.version.split()[0]}")
+    st.markdown(f"🔥 PyTorch: {torch.__version__}")
+
+# Model architecture (same as your training)
 class UNetBlock(nn.Module):
     def __init__(self, in_c, out_c, down=True, use_act=True, dropout=False):
         super().__init__()
@@ -96,234 +115,119 @@ class Generator(nn.Module):
         
         return self.final(torch.cat([up7, d1], 1))
 
-# Download model from GitHub release
 @st.cache_resource
 def load_model():
-    """Load the pre-trained generator model"""
-    # Direct download URL for your model
+    """Load the pre-trained model"""
+    # CORRECTED URL - using download instead of tag
     model_url = "https://github.com/Abdulbaset1/Doodle-to-Real-Image-Translation-and-Colorization-using-Pix2Pix/releases/download/v1/gen_25.pth"
     model_path = "gen_25.pth"
     
-    # Check if model exists, download if not
+    # Download model if not exists
     if not os.path.exists(model_path):
         try:
-            with st.spinner("📥 Downloading model... This may take a few minutes..."):
-                st.info(f"Downloading from: {model_url}")
+            with st.spinner("📥 Downloading model (this may take a minute)..."):
+                response = requests.get(model_url, timeout=60)
+                response.raise_for_status()
                 
-                # Add headers to avoid GitHub rate limiting
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                }
-                response = requests.get(model_url, stream=True, timeout=60, headers=headers)
-                response.raise_for_status()  # Raise an error for bad status codes
+                with open(model_path, "wb") as f:
+                    f.write(response.content)
                 
-                total_size = int(response.headers.get('content-length', 0))
-                if total_size > 0:
-                    progress_bar = st.progress(0)
-                    downloaded = 0
-                    
-                    with open(model_path, "wb") as f:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            progress = min(downloaded / total_size, 1.0)
-                            progress_bar.progress(progress)
-                    
-                    progress_bar.empty()
-                else:
-                    # Fallback if no content-length header
-                    with open(model_path, "wb") as f:
-                        f.write(response.content)
-                
-                st.success("✅ Model downloaded successfully!")
-        except requests.exceptions.RequestException as e:
-            st.error(f"❌ Failed to download model: {str(e)}")
-            st.error("Please check if the model file exists at the URL")
-            return None, None
+                st.success("✅ Model downloaded!")
         except Exception as e:
-            st.error(f"❌ Unexpected error during download: {str(e)}")
+            st.error(f"❌ Download failed: {str(e)}")
+            st.info("Please make sure the model file exists at: gen_25.pth in the release")
             return None, None
     
     # Load model
     try:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        st.info(f"Loading model on {device}...")
-        
         model = Generator()
         
-        # Load the state dict with different compatibility modes
-        try:
-            # Try loading with weights_only=False (more compatible)
-            state_dict = torch.load(model_path, map_location=device, weights_only=False)
-        except TypeError:
-            # Older PyTorch version doesn't have weights_only parameter
-            state_dict = torch.load(model_path, map_location=device)
-        except Exception as e:
-            st.warning(f"First loading attempt failed: {str(e)}")
-            # Try without map_location
-            state_dict = torch.load(model_path, weights_only=False)
+        # Load state dict
+        state_dict = torch.load(model_path, map_location=device)
         
-        # Handle potential 'module.' prefix in state dict keys
-        new_state_dict = {}
-        for k, v in state_dict.items():
-            if k.startswith('module.'):
-                new_state_dict[k[7:]] = v  # Remove 'module.' prefix
-            else:
-                new_state_dict[k] = v
+        # Handle potential 'module.' prefix
+        if any(k.startswith('module.') for k in state_dict.keys()):
+            state_dict = {k[7:]: v for k, v in state_dict.items()}
         
-        model.load_state_dict(new_state_dict)
+        model.load_state_dict(state_dict)
         model = model.to(device)
         model.eval()
         
-        st.success(f"✅ Model loaded successfully on {device.upper()}!")
+        st.success(f"✅ Model loaded on {device.upper()}!")
         return model, device
     except Exception as e:
-        st.error(f"❌ Error loading model: {str(e)}")
-        st.error(traceback.format_exc())
+        st.error(f"❌ Model loading error: {str(e)}")
         return None, None
 
-# Preprocess image
-def preprocess_image(image, target_size=256):
-    """Preprocess the input image for the model"""
-    try:
-        # Convert to RGB if needed
-        if image.mode != 'RGB':
-            image = image.convert('RGB')
-        
-        # Define transform
-        transform = transforms.Compose([
-            transforms.Resize((target_size, target_size)),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-        ])
-        
-        # Transform and add batch dimension
-        input_tensor = transform(image).unsqueeze(0)
-        return input_tensor
-    except Exception as e:
-        st.error(f"Error preprocessing image: {str(e)}")
-        return None
+# Image preprocessing
+def preprocess(image, target_size=256):
+    if image.mode != 'RGB':
+        image = image.convert('RGB')
+    
+    transform = transforms.Compose([
+        transforms.Resize((target_size, target_size)),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+    ])
+    
+    return transform(image).unsqueeze(0)
 
-# Postprocess output
-def postprocess_output(tensor):
-    """Convert model output tensor to PIL Image"""
-    try:
-        # Remove batch dimension and move to CPU
-        tensor = tensor.squeeze(0).cpu().detach()
-        # Denormalize from [-1, 1] to [0, 1]
-        tensor = (tensor + 1) / 2
-        # Convert to PIL Image
-        tensor = torch.clamp(tensor, 0, 1)
-        to_pil = transforms.ToPILImage()
-        return to_pil(tensor)
-    except Exception as e:
-        st.error(f"Error postprocessing output: {str(e)}")
-        return None
+# Image postprocessing
+def postprocess(tensor):
+    tensor = tensor.squeeze(0).cpu().detach()
+    tensor = (tensor + 1) / 2
+    tensor = torch.clamp(tensor, 0, 1)
+    return transforms.ToPILImage()(tensor)
 
-# Main Streamlit app
+# Main app
 def main():
-    st.title("🎨 Sketch to Real Image Translation")
-    st.markdown("Upload a sketch and watch it transform into a realistic image using Pix2Pix GAN!")
-    
-    # Initialize session state for model
-    if 'model_loaded' not in st.session_state:
-        st.session_state.model_loaded = False
-    
     # Load model
     model, device = load_model()
     
     if model is None:
-        st.error("Failed to load model. Please check the logs above.")
-        st.stop()
+        st.error("Cannot proceed without model. Please check the error above.")
+        return
     
-    st.session_state.model_loaded = True
-    
-    # Create two columns for input and output
+    # Create columns
     col1, col2 = st.columns(2)
     
     with col1:
         st.subheader("📤 Input Sketch")
         uploaded_file = st.file_uploader(
-            "Choose a sketch image...",
-            type=["jpg", "jpeg", "png", "bmp", "webp"]
+            "Choose an image...", 
+            type=["jpg", "jpeg", "png", "bmp"]
         )
         
-        if uploaded_file is not None:
-            try:
-                # Display input image
-                input_image = Image.open(uploaded_file)
-                st.image(input_image, caption="Uploaded Sketch", use_container_width=True)
-                
-                # Add generate button
-                if st.button("🚀 Generate Real Image", type="primary", use_container_width=True):
-                    with st.spinner("🎨 Generating image... This may take a few seconds."):
-                        # Preprocess
-                        input_tensor = preprocess_image(input_image)
-                        if input_tensor is None:
-                            st.error("Failed to preprocess image")
-                            return
+        if uploaded_file:
+            input_image = Image.open(uploaded_file)
+            st.image(input_image, use_container_width=True)
+            
+            if st.button("🚀 Generate", type="primary", use_container_width=True):
+                with st.spinner("🎨 Generating..."):
+                    # Process
+                    input_tensor = preprocess(input_image).to(device)
+                    
+                    with torch.no_grad():
+                        output_tensor = model(input_tensor)
+                    
+                    output_image = postprocess(output_tensor)
+                    
+                    # Display result
+                    with col2:
+                        st.subheader("✨ Result")
+                        st.image(output_image, use_container_width=True)
                         
-                        input_tensor = input_tensor.to(device)
-                        
-                        # Generate
-                        with torch.no_grad():
-                            output_tensor = model(input_tensor)
-                        
-                        # Postprocess
-                        output_image = postprocess_output(output_tensor)
-                        if output_image is None:
-                            st.error("Failed to postprocess output")
-                            return
-                        
-                        # Display in second column
-                        with col2:
-                            st.subheader("✨ Generated Real Image")
-                            st.image(output_image, caption="Generated Output", use_container_width=True)
-                            
-                            # Add download button
-                            buf = io.BytesIO()
-                            output_image.save(buf, format="PNG")
-                            byte_im = buf.getvalue()
-                            
-                            st.download_button(
-                                label="💾 Download Generated Image",
-                                data=byte_im,
-                                file_name="generated_image.png",
-                                mime="image/png",
-                                use_container_width=True
-                            )
-            except Exception as e:
-                st.error(f"Error processing uploaded file: {str(e)}")
-                st.error(traceback.format_exc())
-    
-    # Add information in sidebar
-    with st.sidebar:
-        st.markdown("## 📌 About")
-        st.markdown("""
-        This app uses a **Pix2Pix GAN** model trained on the CUHK Face Sketch Database (CUFS).
-        
-        ### How it works:
-        1. Upload a sketch/face drawing
-        2. The model processes the sketch
-        3. Generates a realistic face image
-        
-        ### Model Architecture:
-        - **Generator**: U-Net with skip connections
-        - **Training**: Conditional GAN with L1 loss
-        - **Input Size**: 256x256 pixels
-        - **Output**: RGB image
-        
-        ### Tips for best results:
-        - Use front-facing face sketches
-        - Clear lines work better
-        - Image will be resized to 256x256
-        
-        ### Note:
-        The model works best with face sketches similar to the training data.
-        """)
-        
-        st.markdown("---")
-        st.markdown("Made with ❤️ using Streamlit & PyTorch")
+                        # Download button
+                        buf = io.BytesIO()
+                        output_image.save(buf, format="PNG")
+                        st.download_button(
+                            label="💾 Download",
+                            data=buf.getvalue(),
+                            file_name="generated.png",
+                            mime="image/png",
+                            use_container_width=True
+                        )
 
 if __name__ == "__main__":
     main()

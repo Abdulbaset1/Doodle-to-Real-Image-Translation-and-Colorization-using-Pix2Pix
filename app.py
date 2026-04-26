@@ -8,6 +8,10 @@ from torchvision import transforms
 import requests
 import os
 import io
+import sys
+
+# Check Python version
+st.sidebar.info(f"Python version: {sys.version.split()[0]}")
 
 # Define the Generator architecture (same as your training code)
 class UNetBlock(nn.Module):
@@ -86,37 +90,56 @@ class Generator(nn.Module):
 # Download model from GitHub release
 @st.cache_resource
 def load_model():
-    # URL for your model file (you need to get the direct download link)
-    # For GitHub releases, the direct download URL format is:
-    # https://github.com/Abdulbaset1/Doodle-to-Real-Image-Translation-and-Colorization-using-Pix2Pix/releases/download/v1/gen_25.pth
-    
+    # Direct download URL for your model
     model_url = "https://github.com/Abdulbaset1/Doodle-to-Real-Image-Translation-and-Colorization-using-Pix2Pix/releases/download/v1/gen_25.pth"
     model_path = "gen_25.pth"
     
-    # Download model if it doesn't exist
+    # Check if model exists, download if not
     if not os.path.exists(model_path):
-        with st.spinner("Downloading model... Please wait!"):
-            response = requests.get(model_url, stream=True)
-            if response.status_code == 200:
+        try:
+            with st.spinner("📥 Downloading model... This may take a few minutes..."):
+                response = requests.get(model_url, stream=True, timeout=30)
+                response.raise_for_status()  # Raise an error for bad status codes
+                
+                total_size = int(response.headers.get('content-length', 0))
+                progress_bar = st.progress(0)
+                
                 with open(model_path, "wb") as f:
+                    downloaded = 0
                     for chunk in response.iter_content(chunk_size=8192):
                         f.write(chunk)
-                st.success("Model downloaded successfully!")
-            else:
-                st.error(f"Failed to download model. Status code: {response.status_code}")
-                return None
+                        downloaded += len(chunk)
+                        if total_size > 0:
+                            progress = min(downloaded / total_size, 1.0)
+                            progress_bar.progress(progress)
+                
+                progress_bar.empty()
+                st.success("✅ Model downloaded successfully!")
+        except Exception as e:
+            st.error(f"❌ Failed to download model: {str(e)}")
+            return None, None
     
     # Load model
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = Generator().to(device)
-    
     try:
-        model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = Generator()
+        
+        # Load with appropriate settings for different PyTorch versions
+        try:
+            # Try loading with weights_only=True (safer, but might fail for older models)
+            state_dict = torch.load(model_path, map_location=device, weights_only=True)
+        except:
+            # Fall back to older loading method
+            state_dict = torch.load(model_path, map_location=device)
+            
+        model.load_state_dict(state_dict)
+        model = model.to(device)
         model.eval()
-        st.success(f"Model loaded successfully on {device}!")
+        
+        st.success(f"✅ Model loaded successfully on {device.upper()}!")
         return model, device
     except Exception as e:
-        st.error(f"Error loading model: {str(e)}")
+        st.error(f"❌ Error loading model: {str(e)}")
         return None, None
 
 # Preprocess image
@@ -129,7 +152,7 @@ def preprocess_image(image, target_size=256):
     transform = transforms.Compose([
         transforms.Resize((target_size, target_size)),
         transforms.ToTensor(),
-        transforms.Normalize((0.5,), (0.5,))
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
     ])
     
     # Transform and add batch dimension
@@ -139,7 +162,7 @@ def preprocess_image(image, target_size=256):
 # Postprocess output
 def postprocess_output(tensor):
     # Remove batch dimension and move to CPU
-    tensor = tensor.squeeze(0).cpu()
+    tensor = tensor.squeeze(0).cpu().detach()
     # Denormalize from [-1, 1] to [0, 1]
     tensor = (tensor + 1) / 2
     # Convert to PIL Image
@@ -149,7 +172,11 @@ def postprocess_output(tensor):
 
 # Main Streamlit app
 def main():
-    st.set_page_config(page_title="Sketch to Real Image Generator", layout="wide")
+    st.set_page_config(
+        page_title="Sketch to Real Image Generator",
+        page_icon="🎨",
+        layout="wide"
+    )
     
     st.title("🎨 Sketch to Real Image Translation")
     st.markdown("Upload a sketch and watch it transform into a realistic image using Pix2Pix GAN!")
@@ -165,7 +192,10 @@ def main():
     
     with col1:
         st.subheader("📤 Input Sketch")
-        uploaded_file = st.file_uploader("Choose a sketch image...", type=["jpg", "jpeg", "png", "bmp"])
+        uploaded_file = st.file_uploader(
+            "Choose a sketch image...",
+            type=["jpg", "jpeg", "png", "bmp", "webp"]
+        )
         
         if uploaded_file is not None:
             # Display input image
@@ -173,8 +203,8 @@ def main():
             st.image(input_image, caption="Uploaded Sketch", use_container_width=True)
             
             # Add generate button
-            if st.button("🚀 Generate Real Image", type="primary"):
-                with st.spinner("Generating image... This may take a few seconds."):
+            if st.button("🚀 Generate Real Image", type="primary", use_container_width=True):
+                with st.spinner("🎨 Generating image... This may take a few seconds."):
                     # Preprocess
                     input_tensor = preprocess_image(input_image)
                     input_tensor = input_tensor.to(device)
@@ -200,7 +230,8 @@ def main():
                             label="💾 Download Generated Image",
                             data=byte_im,
                             file_name="generated_image.png",
-                            mime="image/png"
+                            mime="image/png",
+                            use_container_width=True
                         )
     
     # Add information in sidebar
@@ -218,10 +249,15 @@ def main():
         - **Generator**: U-Net with skip connections
         - **Training**: Conditional GAN with L1 loss
         - **Input Size**: 256x256 pixels
-        - **Output**: RGB image in range [0,1]
+        - **Output**: RGB image
+        
+        ### Tips for best results:
+        - Use front-facing face sketches
+        - Clear lines work better
+        - Image will be resized to 256x256
         
         ### Note:
-        For best results, use front-facing face sketches.
+        The model works best with face sketches similar to the training data.
         """)
         
         st.markdown("---")

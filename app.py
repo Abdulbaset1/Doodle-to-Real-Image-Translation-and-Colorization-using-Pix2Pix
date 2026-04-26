@@ -135,7 +135,7 @@ def load_model():
                 st.success("✅ Model downloaded!")
         except Exception as e:
             st.error(f"❌ Download failed: {str(e)}")
-            st.info("Please make sure the model file exists at: gen_25.pth in the release")
+            st.info("Please make sure the model file exists in the GitHub release")
             return None, None
     
     # Load model
@@ -154,7 +154,9 @@ def load_model():
         model = model.to(device)
         model.eval()
         
-        st.success(f"✅ Model loaded on {device.upper()}!")
+        # FIXED: Convert device to string for display
+        device_name = str(device).upper()
+        st.success(f"✅ Model loaded on {device_name}!")
         return model, device
     except Exception as e:
         st.error(f"❌ Model loading error: {str(e)}")
